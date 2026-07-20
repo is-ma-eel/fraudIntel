@@ -197,9 +197,9 @@ def inject_custom_css():
         }}
 
         /* KPI cards */
-        .kpi-grid {{
+       .kpi-grid {{
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
             gap: 14px;
             margin-bottom: 24px;
         }}
@@ -297,6 +297,44 @@ def inject_custom_css():
             font-size: 0.8rem;
             text-align: center;
             margin-top: 18px;
+        }}
+
+        /* Mobile responsiveness */
+        @media (max-width: 768px) {{
+            .hero {{
+                padding: 20px 18px;
+            }}
+            .hero-title {{
+                font-size: 1.4rem;
+            }}
+            .hero-eyebrow {{
+                font-size: 0.68rem;
+            }}
+            .hero-sub {{
+                font-size: 0.85rem;
+            }}
+            .kpi-grid {{
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }}
+            .kpi-value {{
+                font-size: 1.25rem;
+            }}
+            .kpi-card {{
+                padding: 12px 14px;
+            }}
+            .section-title {{
+                font-size: 1rem;
+            }}
+        }}
+
+        @media (max-width: 480px) {{
+            .kpi-grid {{
+                grid-template-columns: 1fr;
+            }}
+            .hero-title {{
+                font-size: 1.2rem;
+            }}
         }}
         </style>
         """,
