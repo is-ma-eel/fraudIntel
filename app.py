@@ -384,27 +384,80 @@ def section_header(title):
 # script. Replace these with real data sources later.
 # ============================================================
 
-def get_kpi_data():
-    """Returns a dictionary of top-level summary KPI numbers."""
+def get_kpi_data(df):
+    """Calculates top-level KPI numbers from the loaded fraud case data."""
+    if df.empty:
+        return {
+            "total_frauds": 0,
+            "total_amount_lost": 0,
+            "average_amount_lost": 0,
+            "arrests_made": 0,
+            "sources_monitored": 0,
+        }
+
+    amounts = pd.to_numeric(df.get("Amount_Lost_USD"), errors="coerce").fillna(0)
+
+    total_frauds = len(df)
+    total_amount_lost = amounts.sum()
+    average_amount_lost = amounts.mean() if total_frauds else 0
+
+    # "Arrest" anywhere in Court_Status or Charges counts as an arrest made
+    arrest_mask = pd.Series(False, index=df.index)
+    for col in ("Court_Status", "Charges"):
+        if col in df.columns:
+            arrest_mask |= df[col].astype(str).str.contains("arrest", case=False, na=False)
+    arrests_made = int(arrest_mask.sum())
+
+    sources_monitored = (
+        df["Source_Name"].nunique() if "Source_Name" in df.columns else len(get_data_sources())
+    )
+
     return {
-        "total_frauds": 1284,
-        "total_amount_lost": 5_430_000,   # in GHS
-        "average_amount_lost": 4_228,     # in GHS
-        "arrests_made": 97,
-        "sources_monitored": 7,
+        "total_frauds": total_frauds,
+        "total_amount_lost": total_amount_lost,
+        "average_amount_lost": average_amount_lost,
+        "arrests_made": arrests_made,
+        "sources_monitored": sources_monitored,
     }
 
 
-def get_kpi_deltas():
-    """Returns sample month-over-month percentage changes for each KPI.
-    Positive is not always 'good' (e.g. more frauds reported is bad news,
-    more arrests is good news) — direction/color is decided in the UI."""
-    return {
-        "total_frauds": 6.4,
-        "total_amount_lost": 9.1,
-        "average_amount_lost": -2.3,
-        "arrests_made": 14.0,
+def get_kpi_deltas(df):
+    """Calculates year-over-year % change for each KPI, based on the
+    'Date' column. Returns 0.0 for everything if there isn't at least
+    two distinct years of data to compare."""
+    zero_deltas = {
+        "total_frauds": 0.0,
+        "total_amount_lost": 0.0,
+        "average_amount_lost": 0.0,
+        "arrests_made": 0.0,
         "sources_monitored": 0.0,
+    }
+
+    if df.empty or "Date" not in df.columns:
+        return zero_deltas
+
+    years = df["Date"].astype(str).str.extract(r"(\d{4})")[0]
+    working = df.assign(_year=years).dropna(subset=["_year"])
+    distinct_years = sorted(working["_year"].unique())
+
+    if len(distinct_years) < 2:
+        return zero_deltas
+
+    current_year, prev_year = distinct_years[-1], distinct_years[-2]
+    cur = working[working["_year"] == current_year]
+    prev = working[working["_year"] == prev_year]
+
+    def pct_change(cur_val, prev_val):
+        if prev_val == 0:
+            return 0.0
+        return (cur_val - prev_val) / prev_val * 100
+
+    cur_kpis = get_kpi_data(cur)
+    prev_kpis = get_kpi_data(prev)
+
+    return {
+        key: round(pct_change(cur_kpis[key], prev_kpis[key]), 1)
+        for key in zero_deltas
     }
 
 
@@ -416,44 +469,54 @@ def get_response_rate_data():
     }
 
 
-def get_monthly_trend_data():
-    """Returns sample monthly fraud case counts (Jan - Jul)."""
-    data = {
-        "Month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul"],
-        "Fraud Cases": [120, 145, 160, 190, 210, 230, 229],
-    }
-    return pd.DataFrame(data)
+def get_yearly_trend_data(df):
+    """Derives yearly fraud case counts from the 'Date' column.
+    Handles messy date strings (e.g. '2025', 'May-July, 2025') by
+    extracting the first 4-digit year found in the text."""
+    if df.empty or "Date" not in df.columns:
+        return pd.DataFrame({"Year": [], "Fraud Cases": []})
+
+    years = df["Date"].astype(str).str.extract(r"(\d{4})")[0]
+    working = df.assign(_year=years).dropna(subset=["_year"])
+
+    counts = (
+        working.groupby("_year")
+        .size()
+        .sort_index()
+        .reset_index(name="Fraud Cases")
+    )
+    counts.columns = ["Year", "Fraud Cases"]
+    return counts
 
 
-def get_fraud_category_data():
-    """Returns sample fraud category distribution (percentages)."""
-    data = {
-        "Category": [
-            "Mobile Money Fraud",
-            "Investment Scam",
-            "Romance Scam",
-            "Identity Theft",
-            "Business Email Compromise",
-            "Payroll & Procurement Fraud",
-        ],
-        "Percentage": [35, 20, 15, 12, 10, 8],
-    }
-    return pd.DataFrame(data)
+def get_fraud_category_data(df):
+    """Derives fraud category distribution (percentages) from the data."""
+    if df.empty or "Fraud_Category" not in df.columns:
+        return pd.DataFrame({"Category": [], "Percentage": []})
+
+    counts = df["Fraud_Category"].fillna("Unknown").value_counts()
+    percentages = (counts / counts.sum() * 100).round(1)
+
+    return pd.DataFrame({
+        "Category": percentages.index,
+        "Percentage": percentages.values,
+    })
 
 
-def get_fraud_methods_data():
-    """Returns sample data for the top fraud methods used by scammers."""
-    data = {
-        "Method": [
-            "Fake MoMo Reversal",
-            "Phishing Links",
-            "Fake Investment Platform",
-            "SIM Swap Fraud",
-            "Email Compromise",
-        ],
-        "Cases": [320, 275, 210, 150, 95],
-    }
-    return pd.DataFrame(data)
+def get_fraud_methods_data(df, top_n=5):
+    """Derives the top fraud methods used, ranked by case count."""
+    if df.empty or "Fraud_Method" not in df.columns:
+        return pd.DataFrame({"Method": [], "Cases": []})
+
+    counts = (
+        df["Fraud_Method"]
+        .fillna("Not disclosed")
+        .value_counts()
+        .head(top_n)
+        .reset_index()
+    )
+    counts.columns = ["Method", "Cases"]
+    return counts
 
 
 # def get_recent_cases_data():
@@ -679,8 +742,11 @@ def render_hero(subtitle):
 def render_kpi_cards():
     """Renders the top KPI summary cards as a styled HTML grid, each with
     a colored month-over-month trend arrow for a quick sense of direction."""
-    k = get_kpi_data()
-    deltas = get_kpi_deltas()
+    df = get_recent_cases_data()
+    k = get_kpi_data(df)
+    deltas = get_kpi_deltas(df)
+
+    
 
     # Whether a rising number is good news or bad news, per KPI —
     # decides whether the arrow renders green or red.
@@ -702,11 +768,11 @@ def render_kpi_cards():
         return f'<span class="kpi-delta" style="color:{color};">{arrow} {abs(pct):.1f}%</span>'
 
     cards = [
-        ("total_frauds", "📈", "Total Frauds", f"{k['total_frauds']:,}", "vs last month", COLORS["blue"]),
-        ("total_amount_lost", "💸", "Total Amount Lost", f"USD {k['total_amount_lost']:,}", "vs last month", COLORS["red"]),
-        ("average_amount_lost", "📉", "Average Amount Lost", f"USD {k['average_amount_lost']:,}", "vs last month", COLORS["gold"]),
-        ("arrests_made", "🚓", "Arrests Made", f"{k['arrests_made']}", "vs last month", COLORS["green"]),
-        ("sources_monitored", "🌐", "Sources Monitored", f"{k['sources_monitored']}", "vs last month", COLORS["purple"]),
+        ("total_frauds", "📈", "Total Frauds", f"{k['total_frauds']:,}", "vs last year", COLORS["blue"]),
+        ("total_amount_lost", "💸", "Total Amount Lost", f"USD {k['total_amount_lost']:,}", "vs last year", COLORS["red"]),
+        ("average_amount_lost", "📉", "Average Amount Lost", f"USD {k['average_amount_lost']:,}", "vs last year", COLORS["gold"]),
+        ("arrests_made", "🚓", "Arrests Made", f"{k['arrests_made']}", "vs last year", COLORS["green"]),
+        ("sources_monitored", "🌐", "Sources Monitored", f"{k['sources_monitored']}", "vs last year", COLORS["purple"]),
     ]
     cards_html = "".join(
         f'<div class="kpi-card" style="--accent:{color};">'
@@ -762,15 +828,16 @@ def render_response_gauges():
             st.plotly_chart(_gauge_figure(rates["response_within_48h"], "Acknowledged Within 48h"), use_container_width=True)
 
 
-def render_monthly_trend_chart():
-    """Renders a line/area chart of monthly fraud case trends."""
+def render_yearly_trend_chart():
+    """Renders a bar/area chart of yearly fraud case trends."""
     with st.container(border=True):
-        section_header("Monthly Fraud Cases (Jan – Jul)")
-        df = get_monthly_trend_data()
-        fig = px.area(
-            df, x="Month", y="Fraud Cases", markers=True,
+        section_header("Yearly Fraud Cases")
+        df = get_recent_cases_data()
+        chart_df = get_yearly_trend_data(df)
+        fig = px.bar(
+            chart_df, x="Year", y="Fraud Cases", text="Fraud Cases",
         )
-        fig.update_traces(line_color=COLORS["gold"], fillcolor="rgba(231,178,60,0.15)")
+        fig.update_traces(marker_color=COLORS["gold"], textposition="outside")
         apply_chart_theme(fig)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -779,9 +846,10 @@ def render_fraud_category_pie():
     """Renders a donut chart of fraud category distribution."""
     with st.container(border=True):
         section_header("Fraud Categories")
-        df = get_fraud_category_data()
+        df = get_recent_cases_data()
+        chart_df = get_fraud_category_data(df)
         fig = px.pie(
-            df, names="Category", values="Percentage", hole=0.55,
+            chart_df, names="Category", values="Percentage", hole=0.55,
         )
         fig.update_traces(textinfo="percent", textfont_color=COLORS["text"])
         apply_chart_theme(fig)
@@ -793,16 +861,16 @@ def render_fraud_methods_chart():
     """Renders a horizontal bar chart of the top fraud methods."""
     with st.container(border=True):
         section_header("Top Fraud Methods")
-        df = get_fraud_methods_data().sort_values("Cases", ascending=True)
+        df = get_recent_cases_data()
+        chart_df = get_fraud_methods_data(df).sort_values("Cases", ascending=True)
         fig = px.bar(
-            df, x="Cases", y="Method", orientation="h", text="Cases",
+            chart_df, x="Cases", y="Method", orientation="h", text="Cases",
             color="Method", color_discrete_sequence=CHART_COLORWAY,
         )
         fig.update_traces(textposition="outside", cliponaxis=False)
         fig.update_layout(showlegend=False)
         apply_chart_theme(fig)
         st.plotly_chart(fig, use_container_width=True)
-
 
 def render_recent_cases_table():
     """Renders a table of recent sample fraud cases.
@@ -929,7 +997,7 @@ def page_dashboard():
     with tab_overview:
         col1, col2 = st.columns([1.3, 1])
         with col1:
-            render_monthly_trend_chart()
+            render_yearly_trend_chart()
         with col2:
             render_fraud_category_pie()
 
@@ -968,7 +1036,7 @@ def page_analytics():
     render_kpi_cards()
     col1, col2 = st.columns([1.3, 1])
     with col1:
-        render_monthly_trend_chart()
+        render_yearly_trend_chart()
     with col2:
         render_fraud_category_pie()
     render_response_gauges()
